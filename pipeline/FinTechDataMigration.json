@@ -1,0 +1,304 @@
+{
+	"name": "FinTechDataMigration",
+	"properties": {
+		"activities": [
+			{
+				"name": "GetTableList",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzureSqlSource",
+						"sqlReaderQuery": "SELECT \n    TABLE_SCHEMA as SchemaName,\n    TABLE_NAME as TableName\nFROM INFORMATION_SCHEMA.TABLES\nWHERE TABLE_TYPE = 'BASE TABLE'\nAND TABLE_SCHEMA = 'fintech'\nORDER BY SchemaName, TableName",
+						"queryTimeout": "02:00:00",
+						"partitionOption": "None"
+					},
+					"dataset": {
+						"referenceName": "SQLSource",
+						"type": "DatasetReference"
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "Loop Through Tables",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "GetTableList",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('GetTableList').output.value",
+						"type": "Expression"
+					},
+					"isSequential": true,
+					"activities": [
+						{
+							"name": "Copy to Bronze Layer",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.12:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "AzureSqlSource",
+									"sqlReaderQuery": {
+										"value": "@{concat('SELECT * from ',item().SchemaName,'.',item().TableName)}",
+										"type": "Expression"
+									},
+									"queryTimeout": "02:00:00",
+									"partitionOption": "None"
+								},
+								"sink": {
+									"type": "ParquetSink",
+									"storeSettings": {
+										"type": "AzureBlobFSWriteSettings"
+									},
+									"formatSettings": {
+										"type": "ParquetWriteSettings"
+									}
+								},
+								"enableStaging": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "SQLSource",
+									"type": "DatasetReference"
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "BronzeLayer",
+									"type": "DatasetReference",
+									"parameters": {
+										"tablename": {
+											"value": "@item().TableName",
+											"type": "Expression"
+										},
+										"schemaname": {
+											"value": "@item().SchemaName",
+											"type": "Expression"
+										}
+									}
+								}
+							]
+						}
+					]
+				}
+			},
+			{
+				"name": "BronzeToSilverDataProcess",
+				"type": "SynapseNotebook",
+				"dependsOn": [
+					{
+						"activity": "Loop Through Tables",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": "BronzetoSilverDataProcessing",
+						"type": "NotebookReference"
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": "gdsdemopools",
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Small",
+					"conf": {
+						"spark.dynamicAllocation.enabled": false
+					},
+					"driverSize": "Small",
+					"authentication": {
+						"type": "MSI"
+					}
+				}
+			},
+			{
+				"name": "SilverToGoldDataProcess",
+				"type": "SynapseNotebook",
+				"dependsOn": [
+					{
+						"activity": "BronzeToSilverDataProcess",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"notebook": {
+						"referenceName": "SilverToGoldDataProcessing",
+						"type": "NotebookReference"
+					},
+					"snapshot": true,
+					"sparkPool": {
+						"referenceName": "gdsdemopools",
+						"type": "BigDataPoolReference"
+					},
+					"executorSize": "Small",
+					"conf": {
+						"spark.dynamicAllocation.enabled": false
+					},
+					"driverSize": "Small",
+					"authentication": {
+						"type": "MSI"
+					}
+				}
+			},
+			{
+				"name": "SuccessNotification",
+				"type": "WebActivity",
+				"dependsOn": [
+					{
+						"activity": "SilverToGoldDataProcess",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"method": "POST",
+					"url": "https://prod-01.northeurope.logic.azure.com:443/workflows/df401b0447754711bf356cb91ae1066a/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=BLoYYFttv8cP0r8KrYEkzM6mXHX6DUP4eaAbQpesiIk",
+					"connectVia": {
+						"referenceName": "AutoResolveIntegrationRuntime",
+						"type": "IntegrationRuntimeReference"
+					},
+					"body": {
+						"value": "{\n    \"to\": \"@{pipeline().parameters.to}\",\n    \"email\": \"@{pipeline().parameters.emailSuccess}\",\n    \"subject\": \"@{pipeline().parameters.subjectSuccess}\",\n}",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "FailedNotification",
+				"type": "WebActivity",
+				"dependsOn": [
+					{
+						"activity": "SilverToGoldDataProcess",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "BronzeToSilverDataProcess",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "Loop Through Tables",
+						"dependencyConditions": [
+							"Failed"
+						]
+					},
+					{
+						"activity": "GetTableList",
+						"dependencyConditions": [
+							"Failed"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.12:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"method": "POST",
+					"url": "https://prod-01.northeurope.logic.azure.com:443/workflows/df401b0447754711bf356cb91ae1066a/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=BLoYYFttv8cP0r8KrYEkzM6mXHX6DUP4eaAbQpesiIk",
+					"connectVia": {
+						"referenceName": "AutoResolveIntegrationRuntime",
+						"type": "IntegrationRuntimeReference"
+					},
+					"body": {
+						"value": "{\n    \"to\": \"@{pipeline().parameters.to}\",\n    \"email\": \"@{pipeline().parameters.emailFailed}\",\n    \"subject\": \"@{pipeline().parameters.subjectFailed}\",\n}",
+						"type": "Expression"
+					}
+				}
+			}
+		],
+		"parameters": {
+			"to": {
+				"type": "string",
+				"defaultValue": "umangmahe12@gmail.com"
+			},
+			"subjectSuccess": {
+				"type": "string",
+				"defaultValue": "Pipeline Execution Successful"
+			},
+			"emailSuccess": {
+				"type": "string",
+				"defaultValue": "Your Pipeline was executed successfully!"
+			},
+			"subjectFailed": {
+				"type": "string",
+				"defaultValue": "Pipeline Execution Failed"
+			},
+			"emailFailed": {
+				"type": "string",
+				"defaultValue": "Your Pipeline was execution failed :("
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2025-12-23T04:03:53Z"
+	},
+	"type": "Microsoft.Synapse/workspaces/pipelines"
+}
