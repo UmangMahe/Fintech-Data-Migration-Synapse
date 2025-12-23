@@ -1,0 +1,30 @@
+{
+	"$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+	"contentVersion": "1.0.0.0",
+	"parameters": {
+		"workspaceName": {
+			"value": "synapsedummyworkspace"
+		},
+		"AzureSqlDatabase1_password": {
+			"value": ""
+		},
+		"synapsedummyworkspace-WorkspaceDefaultSqlServer_connectionString": {
+			"value": "Integrated Security=False;Encrypt=True;Connection Timeout=30;Data Source=tcp:synapsedummyworkspace.sql.azuresynapse.net,1433;Initial Catalog=@{linkedService().DBName}"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_server": {
+			"value": "sql-demo-finttech.database.windows.net"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_database": {
+			"value": "fintech"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_userName": {
+			"value": "admingds"
+		},
+		"FintechDataLake_properties_typeProperties_url": {
+			"value": "https://synapsedummyadls.dfs.core.windows.net/"
+		},
+		"synapsedummyworkspace-WorkspaceDefaultStorage_properties_typeProperties_url": {
+			"value": "https://synapsedummyadls.dfs.core.windows.net"
+		}
+	}
+}

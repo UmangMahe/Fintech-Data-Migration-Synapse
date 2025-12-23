@@ -1,0 +1,941 @@
+{
+	"$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+	"contentVersion": "1.0.0.0",
+	"parameters": {
+		"workspaceName": {
+			"type": "string",
+			"metadata": "Workspace name",
+			"defaultValue": "synapsedummyworkspace"
+		},
+		"AzureSqlDatabase1_password": {
+			"type": "secureString",
+			"metadata": "Secure string for 'password' of 'AzureSqlDatabase1'"
+		},
+		"synapsedummyworkspace-WorkspaceDefaultSqlServer_connectionString": {
+			"type": "secureString",
+			"metadata": "Secure string for 'connectionString' of 'synapsedummyworkspace-WorkspaceDefaultSqlServer'",
+			"defaultValue": "Integrated Security=False;Encrypt=True;Connection Timeout=30;Data Source=tcp:synapsedummyworkspace.sql.azuresynapse.net,1433;Initial Catalog=@{linkedService().DBName}"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_server": {
+			"type": "string",
+			"defaultValue": "sql-demo-finttech.database.windows.net"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_database": {
+			"type": "string",
+			"defaultValue": "fintech"
+		},
+		"AzureSqlDatabase1_properties_typeProperties_userName": {
+			"type": "string",
+			"defaultValue": "admingds"
+		},
+		"FintechDataLake_properties_typeProperties_url": {
+			"type": "string",
+			"defaultValue": "https://synapsedummyadls.dfs.core.windows.net/"
+		},
+		"synapsedummyworkspace-WorkspaceDefaultStorage_properties_typeProperties_url": {
+			"type": "string",
+			"defaultValue": "https://synapsedummyadls.dfs.core.windows.net"
+		}
+	},
+	"variables": {
+		"workspaceId": "[concat('Microsoft.Synapse/workspaces/', parameters('workspaceName'))]"
+	},
+	"resources": [
+		{
+			"name": "[concat(parameters('workspaceName'), '/FinTechDataMigration')]",
+			"type": "Microsoft.Synapse/workspaces/pipelines",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"activities": [
+					{
+						"name": "GetTableList",
+						"type": "Lookup",
+						"dependsOn": [],
+						"policy": {
+							"timeout": "0.12:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"source": {
+								"type": "AzureSqlSource",
+								"sqlReaderQuery": "SELECT \n    TABLE_SCHEMA as SchemaName,\n    TABLE_NAME as TableName\nFROM INFORMATION_SCHEMA.TABLES\nWHERE TABLE_TYPE = 'BASE TABLE'\nAND TABLE_SCHEMA = 'fintech'\nORDER BY SchemaName, TableName",
+								"queryTimeout": "02:00:00",
+								"partitionOption": "None"
+							},
+							"dataset": {
+								"referenceName": "SQLSource",
+								"type": "DatasetReference",
+								"parameters": {}
+							},
+							"firstRowOnly": false
+						}
+					},
+					{
+						"name": "Loop Through Tables",
+						"type": "ForEach",
+						"dependsOn": [
+							{
+								"activity": "GetTableList",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"userProperties": [],
+						"typeProperties": {
+							"items": {
+								"value": "@activity('GetTableList').output.value",
+								"type": "Expression"
+							},
+							"isSequential": true,
+							"activities": [
+								{
+									"name": "Copy to Bronze Layer",
+									"type": "Copy",
+									"dependsOn": [],
+									"policy": {
+										"timeout": "0.12:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"source": {
+											"type": "AzureSqlSource",
+											"sqlReaderQuery": {
+												"value": "@{concat('SELECT * from ',item().SchemaName,'.',item().TableName)}",
+												"type": "Expression"
+											},
+											"queryTimeout": "02:00:00",
+											"partitionOption": "None"
+										},
+										"sink": {
+											"type": "ParquetSink",
+											"storeSettings": {
+												"type": "AzureBlobFSWriteSettings"
+											},
+											"formatSettings": {
+												"type": "ParquetWriteSettings"
+											}
+										},
+										"enableStaging": false,
+										"translator": {
+											"type": "TabularTranslator",
+											"typeConversion": true,
+											"typeConversionSettings": {
+												"allowDataTruncation": true,
+												"treatBooleanAsNumber": false
+											}
+										}
+									},
+									"inputs": [
+										{
+											"referenceName": "SQLSource",
+											"type": "DatasetReference",
+											"parameters": {}
+										}
+									],
+									"outputs": [
+										{
+											"referenceName": "BronzeLayer",
+											"type": "DatasetReference",
+											"parameters": {
+												"tablename": {
+													"value": "@item().TableName",
+													"type": "Expression"
+												},
+												"schemaname": {
+													"value": "@item().SchemaName",
+													"type": "Expression"
+												}
+											}
+										}
+									]
+								}
+							]
+						}
+					},
+					{
+						"name": "BronzeToSilverDataProcess",
+						"type": "SynapseNotebook",
+						"dependsOn": [
+							{
+								"activity": "Loop Through Tables",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"policy": {
+							"timeout": "0.12:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"notebook": {
+								"referenceName": "BronzetoSilverDataProcessing",
+								"type": "NotebookReference"
+							},
+							"snapshot": true,
+							"sparkPool": {
+								"referenceName": "gdsdemopools",
+								"type": "BigDataPoolReference"
+							},
+							"executorSize": "Small",
+							"conf": {
+								"spark.dynamicAllocation.enabled": false
+							},
+							"driverSize": "Small",
+							"authentication": {
+								"type": "MSI"
+							}
+						}
+					},
+					{
+						"name": "SilverToGoldDataProcess",
+						"type": "SynapseNotebook",
+						"dependsOn": [
+							{
+								"activity": "BronzeToSilverDataProcess",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"policy": {
+							"timeout": "0.12:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"notebook": {
+								"referenceName": "SilverToGoldDataProcessing",
+								"type": "NotebookReference"
+							},
+							"snapshot": true,
+							"sparkPool": {
+								"referenceName": "gdsdemopools",
+								"type": "BigDataPoolReference"
+							},
+							"executorSize": "Small",
+							"conf": {
+								"spark.dynamicAllocation.enabled": false
+							},
+							"driverSize": "Small",
+							"authentication": {
+								"type": "MSI"
+							}
+						}
+					},
+					{
+						"name": "SuccessNotification",
+						"type": "WebActivity",
+						"dependsOn": [
+							{
+								"activity": "SilverToGoldDataProcess",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"policy": {
+							"timeout": "0.12:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"method": "POST",
+							"headers": {},
+							"url": "https://prod-01.northeurope.logic.azure.com:443/workflows/df401b0447754711bf356cb91ae1066a/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=BLoYYFttv8cP0r8KrYEkzM6mXHX6DUP4eaAbQpesiIk",
+							"connectVia": {
+								"referenceName": "AutoResolveIntegrationRuntime",
+								"type": "IntegrationRuntimeReference"
+							},
+							"body": {
+								"value": "{\n    \"to\": \"@{pipeline().parameters.to}\",\n    \"email\": \"@{pipeline().parameters.emailSuccess}\",\n    \"subject\": \"@{pipeline().parameters.subjectSuccess}\",\n}",
+								"type": "Expression"
+							}
+						}
+					},
+					{
+						"name": "FailedNotification",
+						"type": "WebActivity",
+						"dependsOn": [
+							{
+								"activity": "SilverToGoldDataProcess",
+								"dependencyConditions": [
+									"Failed"
+								]
+							},
+							{
+								"activity": "BronzeToSilverDataProcess",
+								"dependencyConditions": [
+									"Failed"
+								]
+							},
+							{
+								"activity": "Loop Through Tables",
+								"dependencyConditions": [
+									"Failed"
+								]
+							},
+							{
+								"activity": "GetTableList",
+								"dependencyConditions": [
+									"Failed"
+								]
+							}
+						],
+						"policy": {
+							"timeout": "0.12:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"method": "POST",
+							"headers": {},
+							"url": "https://prod-01.northeurope.logic.azure.com:443/workflows/df401b0447754711bf356cb91ae1066a/triggers/When_an_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_an_HTTP_request_is_received%2Frun&sv=1.0&sig=BLoYYFttv8cP0r8KrYEkzM6mXHX6DUP4eaAbQpesiIk",
+							"connectVia": {
+								"referenceName": "AutoResolveIntegrationRuntime",
+								"type": "IntegrationRuntimeReference"
+							},
+							"body": {
+								"value": "{\n    \"to\": \"@{pipeline().parameters.to}\",\n    \"email\": \"@{pipeline().parameters.emailFailed}\",\n    \"subject\": \"@{pipeline().parameters.subjectFailed}\",\n}",
+								"type": "Expression"
+							}
+						}
+					}
+				],
+				"policy": {
+					"elapsedTimeMetric": {}
+				},
+				"parameters": {
+					"to": {
+						"type": "string",
+						"defaultValue": "umangmahe12@gmail.com"
+					},
+					"subjectSuccess": {
+						"type": "string",
+						"defaultValue": "Pipeline Execution Successful"
+					},
+					"emailSuccess": {
+						"type": "string",
+						"defaultValue": "Your Pipeline was executed successfully!"
+					},
+					"subjectFailed": {
+						"type": "string",
+						"defaultValue": "Pipeline Execution Failed"
+					},
+					"emailFailed": {
+						"type": "string",
+						"defaultValue": "Your Pipeline was execution failed :("
+					}
+				},
+				"annotations": [],
+				"lastPublishTime": "2025-12-23T04:03:53Z"
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/datasets/SQLSource')]",
+				"[concat(variables('workspaceId'), '/notebooks/BronzetoSilverDataProcessing')]",
+				"[concat(variables('workspaceId'), '/bigDataPools/gdsdemopools')]",
+				"[concat(variables('workspaceId'), '/notebooks/SilverToGoldDataProcessing')]",
+				"[concat(variables('workspaceId'), '/integrationRuntimes/AutoResolveIntegrationRuntime')]",
+				"[concat(variables('workspaceId'), '/datasets/BronzeLayer')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/BronzeLayer')]",
+			"type": "Microsoft.Synapse/workspaces/datasets",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "FintechDataLake",
+					"type": "LinkedServiceReference"
+				},
+				"parameters": {
+					"tablename": {
+						"type": "string"
+					},
+					"schemaname": {
+						"type": "string"
+					}
+				},
+				"annotations": [],
+				"type": "Parquet",
+				"typeProperties": {
+					"location": {
+						"type": "AzureBlobFSLocation",
+						"fileName": {
+							"value": "@{concat(dataset().tablename,'.parquet')}",
+							"type": "Expression"
+						},
+						"folderPath": {
+							"value": "@{concat('bronze/',dataset().schemaname,'/',dataset().tablename)}",
+							"type": "Expression"
+						},
+						"fileSystem": "fintech"
+					},
+					"compressionCodec": "snappy"
+				},
+				"schema": []
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/linkedServices/FintechDataLake')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/SQLSource')]",
+			"type": "Microsoft.Synapse/workspaces/datasets",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "AzureSqlDatabase1",
+					"type": "LinkedServiceReference"
+				},
+				"annotations": [],
+				"type": "AzureSqlTable",
+				"schema": [],
+				"typeProperties": {}
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/linkedServices/AzureSqlDatabase1')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/AzureSqlDatabase1')]",
+			"type": "Microsoft.Synapse/workspaces/linkedServices",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"annotations": [],
+				"type": "AzureSqlDatabase",
+				"typeProperties": {
+					"server": "[parameters('AzureSqlDatabase1_properties_typeProperties_server')]",
+					"database": "[parameters('AzureSqlDatabase1_properties_typeProperties_database')]",
+					"encrypt": "mandatory",
+					"trustServerCertificate": true,
+					"authenticationType": "SQL",
+					"userName": "[parameters('AzureSqlDatabase1_properties_typeProperties_userName')]",
+					"password": {
+						"type": "SecureString",
+						"value": "[parameters('AzureSqlDatabase1_password')]"
+					}
+				},
+				"connectVia": {
+					"referenceName": "AutoResolveIntegrationRuntime",
+					"type": "IntegrationRuntimeReference"
+				}
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/integrationRuntimes/AutoResolveIntegrationRuntime')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/FintechDataLake')]",
+			"type": "Microsoft.Synapse/workspaces/linkedServices",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"annotations": [],
+				"type": "AzureBlobFS",
+				"typeProperties": {
+					"url": "[parameters('FintechDataLake_properties_typeProperties_url')]"
+				},
+				"connectVia": {
+					"referenceName": "AutoResolveIntegrationRuntime",
+					"type": "IntegrationRuntimeReference"
+				}
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/integrationRuntimes/AutoResolveIntegrationRuntime')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/synapsedummyworkspace-WorkspaceDefaultSqlServer')]",
+			"type": "Microsoft.Synapse/workspaces/linkedServices",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"parameters": {
+					"DBName": {
+						"type": "String"
+					}
+				},
+				"annotations": [],
+				"type": "AzureSqlDW",
+				"typeProperties": {
+					"connectionString": "[parameters('synapsedummyworkspace-WorkspaceDefaultSqlServer_connectionString')]"
+				},
+				"connectVia": {
+					"referenceName": "AutoResolveIntegrationRuntime",
+					"type": "IntegrationRuntimeReference"
+				}
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/integrationRuntimes/AutoResolveIntegrationRuntime')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/synapsedummyworkspace-WorkspaceDefaultStorage')]",
+			"type": "Microsoft.Synapse/workspaces/linkedServices",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"annotations": [],
+				"type": "AzureBlobFS",
+				"typeProperties": {
+					"url": "[parameters('synapsedummyworkspace-WorkspaceDefaultStorage_properties_typeProperties_url')]"
+				},
+				"connectVia": {
+					"referenceName": "AutoResolveIntegrationRuntime",
+					"type": "IntegrationRuntimeReference"
+				}
+			},
+			"dependsOn": [
+				"[concat(variables('workspaceId'), '/integrationRuntimes/AutoResolveIntegrationRuntime')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/AutoResolveIntegrationRuntime')]",
+			"type": "Microsoft.Synapse/workspaces/integrationRuntimes",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"type": "Managed",
+				"typeProperties": {
+					"computeProperties": {
+						"location": "AutoResolve",
+						"dataFlowProperties": {
+							"computeType": "General",
+							"coreCount": 8,
+							"timeToLive": 0
+						}
+					}
+				}
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/WorkspaceSystemIdentity')]",
+			"type": "Microsoft.Synapse/workspaces/credentials",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"type": "ManagedIdentity",
+				"typeProperties": {}
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/Airbnb_Project_SQL')]",
+			"type": "Microsoft.Synapse/workspaces/sqlscripts",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"content": {
+					"query": "create schema airbnb;\n\ncreate table airbnb.customer_dim (\n    customer_id INT,\n    first_name NVARCHAR(100),\n    last_name NVARCHAR(100),\n    email NVARCHAR(255),\n    phone_number NVARCHAR(50),\n    address NVARCHAR(500),\n    city NVARCHAR(100),\n    state NVARCHAR(100),\n    country NVARCHAR(100),\n    zip_code NVARCHAR(20),\n    signup_date DATE,\n    last_login DATETIME,\n    total_bookings INT,\n    total_spent DECIMAL(10,2),\n    preferred_language NVARCHAR(50),\n    referral_code NVARCHAR(50),\n    account_status NVARCHAR(50)\n);\n\nselect * from airbnb.customer_dim;\n\n----------------------------------------------------------------\n\ncreate table airbnb.booking_fact (\n    booking_id NVARCHAR(100),\n    property_id NVARCHAR(100),\n    customer_id INT,\n    owner_id NVARCHAR(100),\n    check_in_date DATE,\n    check_out_date DATE,\n    booking_date DATETIME,\n    amount FLOAT,\n    currency NVARCHAR(10),\n    city NVARCHAR(100),\n    country NVARCHAR(100),\n    full_address NVARCHAR(255),\n    stay_duration BIGINT,\n    booking_year INT,\n    booking_month INT,\n    timestamp DATETIME\n);\n\nselect * from airbnb.booking_fact;\n\nDROP PROCEDURE airbnb.BookingCustomerAggregation;\n\ncreate TABLE airbnb.BookingCustomerAggregation\nWITH (DISTRIBUTION = ROUND_ROBIN)\nAS \nSELECT \n    c.country,\n    COUNT_BIG(*) as total_bookings,\n    SUM(ISNULL(b.amount, 0)) as total_amount,\n    MAX(b.booking_date) as last_booking_date\nFROM\n    airbnb.booking_fact b\nJOIN\n    airbnb.customer_dim c ON b.customer_id = c.customer_id\nGROUP BY\n    c.country;\n\ncreate PROCEDURE airbnb.BookingAggregation \nAS \nBEGIN\n    TRUNCATE TABLE airbnb.BookingCustomerAggregation\n    INSERT INTO airbnb.BookingCustomerAggregation\n\n    SELECT \n        c.country,\n        COUNT_BIG(*) as total_bookings,\n        SUM(ISNULL(b.amount, 0)) as total_amount,\n        MAX(b.booking_date) as last_booking_date\n    FROM\n        airbnb.booking_fact b\n    JOIN\n        airbnb.customer_dim c ON b.customer_id = c.customer_id\n    GROUP BY\n        c.country;\nEND;\n\nEXEC [airbnb].[BookingAggregation];\n\nTRUNCATE table airbnb.customer_dim;\nTRUNCATE table airbnb.booking_fact;\n\nSELECT * from airbnb.customer_dim;\nselect * from airbnb.booking_fact;\n\nSELECT * from airbnb.BookingCustomerAggregation;",
+					"metadata": {
+						"language": "sql"
+					},
+					"currentConnection": {
+						"databaseName": "Airbnb_dwh",
+						"poolName": "Airbnb_dwh"
+					},
+					"resultLimit": 5000
+				},
+				"type": "SqlQuery"
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/BronzetoSilverDataProcessing')]",
+			"type": "Microsoft.Synapse/workspaces/notebooks",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"nbformat": 4,
+				"nbformat_minor": 2,
+				"bigDataPool": {
+					"referenceName": "gdsdemopools",
+					"type": "BigDataPoolReference"
+				},
+				"sessionProperties": {
+					"driverMemory": "28g",
+					"driverCores": 4,
+					"executorMemory": "28g",
+					"executorCores": 4,
+					"numExecutors": 2,
+					"runAsWorkspaceSystemIdentity": false,
+					"conf": {
+						"spark.dynamicAllocation.enabled": "false",
+						"spark.dynamicAllocation.minExecutors": "2",
+						"spark.dynamicAllocation.maxExecutors": "2",
+						"spark.autotune.trackingId": "cbd448a3-6389-4ead-8845-c529b5f33c92"
+					}
+				},
+				"metadata": {
+					"saveOutput": true,
+					"enableDebugMode": false,
+					"language_info": {
+						"name": "python"
+					},
+					"a365ComputeOptions": {
+						"id": "/subscriptions/04fb1ff0-ec9c-45c6-ba27-bc768db8239a/resourceGroups/gds-learning-2025/providers/Microsoft.Synapse/workspaces/synapsedummyworkspace/bigDataPools/gdsdemopools",
+						"name": "gdsdemopools",
+						"type": "Spark",
+						"endpoint": "https://synapsedummyworkspace.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/gdsdemopools",
+						"auth": {
+							"type": "AAD",
+							"authResource": "https://dev.azuresynapse.net",
+							"authHeader": null
+						},
+						"sparkVersion": "3.5",
+						"nodeCount": 3,
+						"cores": 4,
+						"memory": 28,
+						"extraHeader": null
+					},
+					"sessionKeepAliveTimeout": 30
+				},
+				"cells": [
+					{
+						"cell_type": "code",
+						"source": [
+							"from pyspark.sql.functions import *\n",
+							"\n",
+							"base_path = \"abfss://fintech@synapsedummyadls.dfs.core.windows.net/bronze/fintech/\"\n",
+							"output_base_path = \"abfss://fintech@synapsedummyadls.dfs.core.windows.net/silver/fintech/\"\n",
+							"\n",
+							"spark.conf.set(\"spark.databricks.delta.scheme.autoMerge.enabled\", \"true\")"
+						],
+						"outputs": [],
+						"execution_count": 37
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"spark.read.format(\"binaryFile\") \\\n",
+							"    .load(base_path) \\\n",
+							"    .select(\"path\") \\\n",
+							"    .show(truncate=False)"
+						],
+						"outputs": [],
+						"execution_count": 38
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"def transform_accounts():\n",
+							"    df = spark.read.parquet(f\"{base_path}Accounts/Accounts.parquet\")\n",
+							"    df_transformed = df.withColumn(\"AccountAgeYears\", months_between(current_date(), col(\"OpenDate\"))/12)\n",
+							"    df_transformed.write.format('delta').mode(\"overwrite\").save(f\"{output_base_path}Accounts/\")"
+						],
+						"outputs": [],
+						"execution_count": 39
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"def transform_customers():\n",
+							"    df = spark.read.parquet(f\"{base_path}Customers/Customers.parquet\")\n",
+							"    df_transformed = df.withColumn(\"FullName\", concat_ws(\" \", col(\"FirstName\"), col(\"LastName\")))\\\n",
+							"                        .withColumn(\"MaskedEmail\", concat(lit(\"***@\"), substring_index(col(\"Email\"), \"@\", -1)))\n",
+							"    df_transformed.write.format('delta').mode(\"overwrite\").save(f\"{output_base_path}Customers/\")"
+						],
+						"outputs": [],
+						"execution_count": 40
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"def transform_loans():\n",
+							"    df = spark.read.parquet(f\"{base_path}Loans/Loans.parquet\")\n",
+							"    df_transformed = df.withColumn(\"TotalInterest\", (col(\"LoanAmount\") * col(\"InterestRate\") / 100).cast(\"decimal(28,8)\"))\\\n",
+							"                        .withColumn(\"LoanDurationYears\", months_between(col(\"LoanEndDate\"), col(\"LoanStartDate\"))/12)\n",
+							"    df_transformed.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}Loans/\")\n",
+							""
+						],
+						"outputs": [],
+						"execution_count": 41
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"def transform_payments():\n",
+							"    df = spark.read.parquet(f\"{base_path}Payments/Payments.parquet\")\n",
+							"    df_transformed = df.withColumn(\"DaysSinceLastPayment\", \n",
+							"                                   datediff(current_date(), col(\"PaymentDate\")))\n",
+							"    df_transformed.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}Payments/\")"
+						],
+						"outputs": [],
+						"execution_count": 42
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"def transform_transactions():\n",
+							"    df = spark.read.parquet(f\"{base_path}Transactions/Transactions.parquet\")\n",
+							"    df_transformed = df.withColumn(\"TransactionCategory\", \n",
+							"                                   when(col(\"TransactionType\") == \"Deposit\", \"Income\")\n",
+							"                                   .when(col(\"TransactionType\") == \"Withdrawal\", \"Expense\")\n",
+							"                                   .otherwise(\"Other\"))\n",
+							"    df_transformed.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}Transactions/\")"
+						],
+						"outputs": [],
+						"execution_count": 43
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"transform_accounts()\n",
+							"transform_customers()\n",
+							"transform_loans()\n",
+							"transform_payments()\n",
+							"transform_transactions()\n",
+							"\n",
+							"\n",
+							"print(\"Bronze To Silver Completed !!\")"
+						],
+						"outputs": [],
+						"execution_count": 44
+					}
+				]
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/SilverToGoldDataProcessing')]",
+			"type": "Microsoft.Synapse/workspaces/notebooks",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"nbformat": 4,
+				"nbformat_minor": 2,
+				"bigDataPool": {
+					"referenceName": "gdsdemopools",
+					"type": "BigDataPoolReference"
+				},
+				"sessionProperties": {
+					"driverMemory": "28g",
+					"driverCores": 4,
+					"executorMemory": "28g",
+					"executorCores": 4,
+					"numExecutors": 2,
+					"runAsWorkspaceSystemIdentity": false,
+					"conf": {
+						"spark.dynamicAllocation.enabled": "false",
+						"spark.dynamicAllocation.minExecutors": "2",
+						"spark.dynamicAllocation.maxExecutors": "2",
+						"spark.autotune.trackingId": "1b91d106-9632-425a-95f5-23cbb81295de"
+					}
+				},
+				"metadata": {
+					"saveOutput": true,
+					"enableDebugMode": false,
+					"language_info": {
+						"name": "python"
+					},
+					"a365ComputeOptions": {
+						"id": "/subscriptions/04fb1ff0-ec9c-45c6-ba27-bc768db8239a/resourceGroups/gds-learning-2025/providers/Microsoft.Synapse/workspaces/synapsedummyworkspace/bigDataPools/gdsdemopools",
+						"name": "gdsdemopools",
+						"type": "Spark",
+						"endpoint": "https://synapsedummyworkspace.dev.azuresynapse.net/livyApi/versions/2019-11-01-preview/sparkPools/gdsdemopools",
+						"auth": {
+							"type": "AAD",
+							"authResource": "https://dev.azuresynapse.net",
+							"authHeader": null
+						},
+						"sparkVersion": "3.5",
+						"nodeCount": 3,
+						"cores": 4,
+						"memory": 28,
+						"extraHeader": null
+					},
+					"sessionKeepAliveTimeout": 30
+				},
+				"cells": [
+					{
+						"cell_type": "code",
+						"source": [
+							"from pyspark.sql.functions import *\n",
+							"\n",
+							"silver_base_path = \"abfss://fintech@synapsedummyadls.dfs.core.windows.net/silver/fintech/\"\n",
+							"output_base_path = \"abfss://fintech@synapsedummyadls.dfs.core.windows.net/gold/fintech/\"\n",
+							"\n",
+							"spark.conf.set(\"spark.databricks.delta.scheme.autoMerge.enabled\", \"true\")"
+						],
+						"outputs": [],
+						"execution_count": 7
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"accounts_df = spark.read.format(\"delta\").load(f\"{silver_base_path}Accounts/\")\n",
+							"customers_df = spark.read.format(\"delta\").load(f\"{silver_base_path}Customers/\")\n",
+							"loans_df = spark.read.format(\"delta\").load(f\"{silver_base_path}Loans/\")\n",
+							"payments_df = spark.read.format(\"delta\").load(f\"{silver_base_path}Payments/\")\n",
+							"transactions_df = spark.read.format(\"delta\").load(f\"{silver_base_path}Transactions/\")"
+						],
+						"outputs": [],
+						"execution_count": 8
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"dim_customers_df = customers_df.select(\n",
+							"    col(\"CustomerID\").alias(\"customer_id\"),\n",
+							"    col(\"FirstName\").alias(\"first_name\"),\n",
+							"    col(\"LastName\").alias(\"last_name\"),\n",
+							"    col(\"Email\").alias(\"email\"),\n",
+							"    col(\"PhoneNumber\").alias(\"phone_number\"),\n",
+							"    col(\"Address\").alias(\"address\"),\n",
+							"    col(\"City\").alias(\"city\"),\n",
+							"    col(\"State\").alias(\"state\"),\n",
+							"    col(\"Country\").alias(\"country\"),\n",
+							"    col(\"ZipCode\").alias(\"zip_code\"),\n",
+							"    col(\"SignupDate\").alias(\"signup_date\")\n",
+							")\n",
+							"\n",
+							"dim_customers_df.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}dim_customers/\")"
+						],
+						"outputs": [],
+						"execution_count": 9
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"dim_accounts_df = accounts_df.select(\n",
+							"    col(\"AccountID\").alias(\"account_id\"),\n",
+							"    col(\"AccountType\").alias(\"account_type\"),\n",
+							"    col(\"Balance\").alias(\"balance\"),\n",
+							"    col(\"OpenDate\").alias(\"open_date\"),\n",
+							"    col(\"AccountAgeYears\").alias(\"account_age_years\")\n",
+							")\n",
+							"\n",
+							"dim_accounts_df.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}dim_accounts/\")"
+						],
+						"outputs": [],
+						"execution_count": 10
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"dim_loans_df = loans_df.select(\n",
+							"    col(\"LoanID\").alias(\"loan_id\"),\n",
+							"    col(\"LoanType\").alias(\"loan_type\"),\n",
+							"    col(\"LoanAmount\").alias(\"loan_amount\"),\n",
+							"    col(\"InterestRate\").alias(\"interest_rate\"),\n",
+							"    col(\"LoanStartDate\").alias(\"loan_start_date\"),\n",
+							"    col(\"LoanEndDate\").alias(\"loan_end_date\"),\n",
+							"    col(\"TotalInterest\").alias(\"total_interest\"),\n",
+							"    col(\"LoanDurationYears\").alias(\"loan_duration_years\")\n",
+							")\n",
+							"\n",
+							"dim_loans_df.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}dim_loans/\")"
+						],
+						"outputs": [],
+						"execution_count": 11
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"fact_payments_df = payments_df \\\n",
+							"    .join(loans_df.select(\"LoanID\", \"CustomerID\"), \"LoanID\") \\\n",
+							"    .select(\n",
+							"        col(\"PaymentID\").alias(\"payment_id\"),\n",
+							"        col(\"LoanID\").alias(\"loan_id\"),\n",
+							"        col(\"CustomerID\").alias(\"customer_id\"),\n",
+							"        col(\"PaymentDate\").alias(\"payment_date\"),\n",
+							"        col(\"PaymentAmount\").alias(\"payment_amount\"),\n",
+							"        col(\"PaymentMethod\").alias(\"payment_method\")\n",
+							"    )\n",
+							"\n",
+							"fact_payments_df.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}fact_payments/\")"
+						],
+						"outputs": [],
+						"execution_count": 12
+					},
+					{
+						"cell_type": "code",
+						"source": [
+							"fact_transactions_df = transactions_df \\\n",
+							"    .join(accounts_df.select(\"AccountID\", \"CustomerID\"), \"AccountID\") \\\n",
+							"    .select(\n",
+							"        col(\"TransactionID\").alias(\"transaction_id\"),\n",
+							"        col(\"AccountID\").alias(\"account_id\"),\n",
+							"        col(\"CustomerID\").alias(\"customer_id\"),\n",
+							"        col(\"TransactionDate\").alias(\"transaction_date\"),\n",
+							"        col(\"Amount\").alias(\"amount\"),\n",
+							"        col(\"TransactionType\").alias(\"transaction_type\"),\n",
+							"        col(\"Description\").alias(\"description\")\n",
+							"    )\n",
+							"\n",
+							"fact_transactions_df.write.format(\"delta\").mode(\"overwrite\").save(f\"{output_base_path}fact_transactions/\")"
+						],
+						"outputs": [],
+						"execution_count": 13
+					}
+				]
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/gdsdemopools')]",
+			"type": "Microsoft.Synapse/workspaces/bigDataPools",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"autoPause": {
+					"enabled": true,
+					"delayInMinutes": 15
+				},
+				"autoScale": {
+					"enabled": false,
+					"maxNodeCount": 3,
+					"minNodeCount": 3
+				},
+				"nodeCount": 3,
+				"nodeSize": "Small",
+				"nodeSizeFamily": "MemoryOptimized",
+				"sparkVersion": "3.5",
+				"isComputeIsolationEnabled": false,
+				"sessionLevelPackagesEnabled": true,
+				"annotations": []
+			},
+			"dependsOn": [],
+			"location": "francecentral"
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/Airbnb_dwh')]",
+			"type": "Microsoft.Synapse/workspaces/sqlPools",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"collation": "SQL_Latin1_General_CP1_CI_AS",
+				"maxSizeBytes": 263882790666240,
+				"annotations": []
+			},
+			"dependsOn": [],
+			"location": "francecentral"
+		},
+		{
+			"name": "[concat(parameters('workspaceName'), '/SqlPool')]",
+			"type": "Microsoft.Synapse/workspaces/sqlPools",
+			"apiVersion": "2019-06-01-preview",
+			"properties": {
+				"collation": "SQL_Latin1_General_CP1_CI_AS",
+				"maxSizeBytes": 263882790666240,
+				"annotations": []
+			},
+			"dependsOn": [],
+			"location": "francecentral"
+		}
+	]
+}
